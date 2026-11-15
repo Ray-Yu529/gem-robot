@@ -8,3 +8,7 @@ __pycache__/
 *.sqlite-wal
 *.sqlite-shm
 eval/out/
+guardian*.sqlite*
+guardian_audit.jsonl
+scenarios_audit.jsonl
+experiment/out/

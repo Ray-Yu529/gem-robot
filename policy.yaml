@@ -1,0 +1,34 @@
+# 動作閘門的政策。政策即資料：版本化、進版控；閘門啟動時載入一次，之後唯讀。
+# 改政策必須重啟閘門所在的程序；沒有任何由 agent 觸發的重載或修改路徑。
+# 這個檔案的 SHA-256 會寫進每一筆稽核紀錄。
+version: 1
+
+# 這個閘門管哪些設備；不在清單內的一律拒絕。
+equipment: [ROBOT01]
+
+# 允許的遠端命令。
+allowed_rcmd: [MOVE]
+
+# 站點分級。字串必須完全相等；不在這兩個清單裡的站一律拒絕。
+stations:
+  auto: [A, B, CHARGER]      # 前置條件都成立就可以執行
+  escalate: [RESTRICTED]     # 需要人工核准（approve.py），閘門自己不會放行
+
+preconditions:
+  control_state: ONLINE_REMOTE
+  robot_state: IDLE          # MOVING -> BUSY；ALARM -> ALARM
+  # 電量必須 >= 這趟行程的估計耗電（由假機器人的耗電模型算）+ 這個安全餘裕
+  battery_safety_margin: 25.0
+
+rate_limit:
+  window_seconds: 300        # 同一設備在這段時間內
+  max_moves: 3               # 最多放行幾次 MOVE
+
+duplicate:
+  window_seconds: 60         # 相同（設備, 站）在這段時間內再次請求視為重複
+
+approval:
+  ttl_seconds: 600           # 待核准的請求多久後自動失效
+
+snapshot:
+  max_age_seconds: 5         # 設備快照超過這個秒數就不採信

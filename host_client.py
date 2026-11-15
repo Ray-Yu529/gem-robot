@@ -13,6 +13,8 @@ from typing import Any, Callable
 import secsgem.common
 import secsgem.gem
 import secsgem.hsms
+from secsgem.gem.communication_state_machine import CommunicationState
+from secsgem.hsms.connection_state_machine import ConnectionState
 
 import gem_ids
 
@@ -57,8 +59,16 @@ def stop_pair(equipment, host: HostClient, settle: float = 0.3) -> None:
 
 
 class HostClient:
-    def __init__(self, address: str = "127.0.0.1", port: int = 5000, session_id: int = 0) -> None:
+    def __init__(
+        self,
+        address: str = "127.0.0.1",
+        port: int = 5000,
+        session_id: int = 0,
+        reply_timeout: float | None = None,
+    ) -> None:
+        timeouts = {} if reply_timeout is None else {"t3": reply_timeout}  # T3：等回覆的秒數（secsgem 預設 45）
         settings = secsgem.hsms.HsmsSettings(
+            **timeouts,
             address=address,
             port=port,
             session_id=session_id,
@@ -82,6 +92,35 @@ class HostClient:
     def wait_communicating(self, timeout: float = 10.0) -> bool:
         """等 S1F13/S1F14 完成（通訊建立）。"""
         return self.handler.waitfor_communicating(timeout)
+
+    def is_communicating(self) -> bool:
+        """HSMS 已 select 而且 GEM 通訊已建立。
+
+        兩個都要看：對方斷線後，secsgem 0.3.0 主機端的 GEM 通訊狀態仍停在 COMMUNICATING，
+        只有 HSMS 連線狀態會變。只看前者會在斷線時照樣把訊息丟進送出佇列。
+        """
+        return (
+            self.handler.protocol.connection_state.current == ConnectionState.CONNECTED_SELECTED
+            and self.handler.communication_state.current == CommunicationState.COMMUNICATING
+        )
+
+    def read_status(self) -> dict | None:
+        """S1F3 讀控制狀態、機器人狀態、電量；沒有回覆（逾時）回 None。"""
+        svids = [gem_ids.SVID_CONTROL_STATE, gem_ids.SVID_ROBOT_STATE, gem_ids.SVID_BATTERY]
+        reply = self.handler.send_and_waitfor_response(self.handler.stream_function(1, 3)(svids))
+        if reply is None or reply.header.function != 4:
+            return None
+        values = self.handler.settings.streams_functions.decode(reply).get()
+        if not isinstance(values, list) or len(values) != len(svids):
+            return None
+        control, robot_state, battery = values
+        if isinstance(control, (bytes, bytearray)):
+            control = control[0] if len(control) == 1 else None
+        return {
+            "control_state": gem_ids.CONTROL_STATE_NAMES.get(control, "UNKNOWN"),
+            "robot_state": robot_state,
+            "battery": battery,
+        }
 
     # ---- 控制狀態 -----------------------------------------------------------
 

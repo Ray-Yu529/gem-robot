@@ -1,5 +1,5 @@
 {
-  "stations": ["A", "B", "CHARGER"],
+  "stations": ["A", "B", "CHARGER", "RESTRICTED"],
   "start_station": "CHARGER",
   "move_seconds": 5.0,
   "battery": {

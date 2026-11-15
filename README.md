@@ -488,3 +488,203 @@ Grafana 在 http://127.0.0.1:3000（帳密在 `.env`），儀表板「gem-robot 
 - Grafana 面板只用 API 驗證「查詢跑得出資料」，沒有人工檢視過畫面上的呈現。
 - 評測（`eval/`）的標準答案仍然只讀 SQLite；對 TimescaleDB 的 MCP 結果是用「與 SQLite 版逐項相等」來驗證的。
 - 只在這台 Windows + Docker Desktop（WSL2）上跑過。
+
+## 第五部分：動作閘門（guardian）與 `request_move`
+
+第一個會改變設備狀態的工具。原則：**LLM 只能「請求」；能不能執行由獨立、確定性的閘門決定，預設拒絕，全部留稽核紀錄。**
+只用模擬器。
+
+```
+agent ──MCP──> mcp_guardian_server.py ──> guardian.py ──> gate.decide()   （純函式：請求 + 設備快照 + 政策 + 時間）
+               request_move                  │  ▲                │
+               get_request_status            │  └── EXECUTE / REJECT / ESCALATE + 原因碼
+                                             │
+                     EXECUTE 才會 ──────────> host_client ──S2F41──> 設備（自己還有一層 HCACK 檢查）
+                     ESCALATE ──> 待核准佇列 <── approve.py（獨立程序，Ed25519 私鑰）
+                     每一筆 ──────────────────> 稽核雜湊鏈（history.py）
+```
+
+```powershell
+.venv\Scripts\python.exe run_scenarios.py                       # 41 個情境，gate 與 MCP 兩條路徑，輸出混淆表
+.venv\Scripts\python.exe approve.py keygen                      # 產生核准者金鑰（兩個環境變數的值）
+.venv\Scripts\python.exe mcp_guardian_server.py --equipment-port 5000 --store guardian.sqlite --audit guardian_audit.jsonl
+.venv\Scripts\python.exe approve.py list --store guardian.sqlite
+.venv\Scripts\python.exe approve.py approve --store guardian.sqlite REQUEST_ID     # 需要 GUARDIAN_APPROVER_PRIVATE_KEY
+```
+
+| 檔案 | 內容 |
+|---|---|
+| `policy.yaml`、`policy.py` | 政策即資料；載入一次成為不可變物件，檔案的 SHA-256 進每一筆稽核紀錄。沒有重載路徑 |
+| `gate.py` | `decide()`：純函式，只 import 標準函式庫，不認得 MCP／GEM／資料庫，永遠不丟例外 |
+| `guardian.py` | 取快照、冪等、速率與重複、稽核、送 S2F41、記 HCACK 與 ARRIVED、驗證核准簽章 |
+| `request_store.py` | 請求與核准的 SQLite 儲存（與遙測資料庫分開） |
+| `mcp_guardian_server.py` | 只有 `request_move`、`get_request_status` 兩個工具；與唯讀的 `mcp_server.py` 是兩個 server |
+| `approve.py` | 人工核准的獨立 CLI |
+| `scenarios.yaml`、`run_scenarios.py` | 41 個情境與執行器 |
+
+為了讓閘門拿到設備快照，設備多了兩個狀態變數（S1F3 可讀的機器人狀態與電量），`host_client` 多了 `read_status()` 與可設定的回覆逾時。
+
+### 工具
+
+| 工具 | 參數 | 說明 |
+|---|---|---|
+| `request_move` | `equipment_id`、`station`、`request_id`、`dry_run`=false | 回傳 `verdict`（EXECUTE／REJECT／ESCALATE）、`reason`、`status`、`executed`、`hcack`、`policy_sha256` |
+| `get_request_status` | `request_id` | 先前請求的目前狀態 |
+
+- **冪等**：`request_id` 由呼叫端提供（1–64 個 `[A-Za-z0-9_-]`）。同一個 `request_id` 重送一律回第一次的結果（`replayed: true`），不再判定、不再送出；
+  被拒絕的結果也一樣固定，要重試就換新的 `request_id`。同一個 `request_id` 換了參數會被拒絕。
+- **`dry_run`**：只回判定與原因，不送出、不佔用 `request_id`、不進待核准佇列；仍會寫稽核。
+- **沒有核准工具，也沒有改政策或重載政策的工具。**
+
+### 政策與判定
+
+檢查順序固定，第一個不通過的決定原因碼：請求格式 → 設備 → 命令 → 站點 → 快照 → 控制狀態 → 機器人狀態 → 電量 → 重複 → 速率 → 站點分級。
+
+| 原因碼 | 判定 | 何時 |
+|---|---|---|
+| `OK` | EXECUTE | auto 站（A、B、CHARGER），前置條件都成立 |
+| `APPROVAL_REQUIRED` | ESCALATE | escalate 站（RESTRICTED），前置條件都成立；進待核准佇列，不送出 |
+| `APPROVED` | EXECUTE | 上一項經人工核准，且**用當下的設備狀態重新檢查**後仍成立 |
+| `BAD_PARAM` | REJECT | 欄位缺失或多餘、不是字串、不符合 `[A-Za-z0-9_-]{1,32}`（空字串、空白、分號、換行、控制字元、非 ASCII、超長） |
+| `UNKNOWN_EQUIPMENT`／`RCMD_NOT_ALLOWED`／`STATION_NOT_ALLOWED` | REJECT | 不在白名單（字串完全相等；不去空白、不轉大小寫） |
+| `NOT_AUTHORIZED_BY_TASK` | REJECT | 只在啟用意圖綁定時：這個站不在這次任務被授權的範圍內（見第六部分） |
+| `HOST_DOWN` | REJECT | 拿不到設備快照或 GEM 連線不通。不排隊、不重試 |
+| `SNAPSHOT_INVALID` | REJECT | 快照欄位缺失、型別不對或超過 5 秒 |
+| `NOT_REMOTE`／`ALARM`／`BUSY` | REJECT | 控制狀態不是 ONLINE-REMOTE；機器人 ALARM；機器人不是 IDLE |
+| `LOW_BATTERY` | REJECT | 電量 < 行程估計耗電（假機器人模型：耗電率 × 移動秒數）+ 安全餘裕 25 |
+| `DUPLICATE` | REJECT | 相同（設備, 站）在 60 秒內已有一筆被放行或被升級的請求 |
+| `RATE_LIMIT` | REJECT | 同一設備 5 分鐘內已放行 3 次 |
+| `INTERNAL_ERROR` | REJECT | 無法判定（包括判定函式自己出錯、時鐘不可用） |
+
+請求的狀態：`REJECTED`、`PENDING_APPROVAL`、`IN_PROGRESS`（設備回 HCACK 0／4）、`COMPLETED`（收到 ARRIVED）、`ABORTED`（接受後進入 ALARM）、
+`EQUIPMENT_REJECTED`（**閘門放行、設備拒絕**，例如送出前狀態變了，設備回 HCACK=2；不算成功）、
+`SEND_FAILED`（閘門放行但沒送出去或沒等到回覆；不重試）、`APPROVAL_DENIED`、`APPROVAL_EXPIRED`。
+
+### 人工核准
+
+`approve.py` 用 Ed25519 私鑰（環境變數 `GUARDIAN_APPROVER_PRIVATE_KEY`）對「這一筆請求 + 決定 + 政策雜湊 + 時間」簽章，寫進請求儲存。
+閘門只有公鑰（`GUARDIAN_APPROVER_PUBLIC_KEY`）：驗得了、簽不出。MCP server 的程序若在環境裡看到私鑰變數會拒絕啟動。
+核准只解除「需要核准」這一項，其餘前置條件在執行前重新檢查；待核准的請求 600 秒後失效。
+已核准的請求是在下一次有人呼叫 `get_request_status` 或 `request_move` 時才被處理（沒有背景輪詢）。
+
+### 稽核
+
+每一筆請求（含被拒絕、被升級、dry_run、重送）都寫進雜湊鏈：`gate_decision`（request_id、參數、設備快照摘要、政策雜湊、判定、原因碼、時鐘）、
+`execution`（HCACK、`gate_allowed_equipment_accepted`／`…_rejected`／`…_send_failed`）、`move_finished`、`request_replay`、
+`approval_received`（簽章是否有效）、`approval_closed`、`approval_ignored`、`guardian_start`。呼叫端給的字串以 `ascii()` 形式截斷到 120 字元後記錄。
+
+### 情境結果
+
+`python run_scenarios.py` 的實際輸出（gate 路徑 40 個、MCP 路徑 40 個；expected 是事先寫的，沒有為了遷就實作而改過）：
+
+```
+type          path  scenarios  match
+benign        gate          4      4
+benign        mcp           4      4
+invalid       gate         15     15
+invalid       mcp          15     15
+state         gate          6      6
+state         mcp           6      6
+abuse         gate          5      5
+abuse         mcp           6      6
+escalate      gate          2      2
+escalate      mcp           2      2
+adversarial   gate          8      8
+adversarial   mcp           7      7
+
+80/80 runs match expected; audit chain verify() = True
+```
+
+### 威脅模型：這個閘門擋什麼、不擋什麼
+
+**先講最重要的限制：閘門不能阻止模型被說服去「請求」。** 資料裡的注入文字仍然可能讓 agent 呼叫 `request_move`；
+閘門只能限制一個請求**能造成的後果**。而且**在合法範圍內的錯誤移動，閘門無法判斷對錯**：
+agent 被說服（或單純搞錯）而把機器人移到 A 而不是使用者要的 B，只要 A 在白名單、前置條件成立、沒超過速率，閘門就會放行。
+閘門檢查的是「這個動作在政策內嗎」，不是「這個動作是使用者要的嗎」。
+
+| 閘門**擋** | 怎麼擋 |
+|---|---|
+| 白名單以外的命令、站點、設備 | 字串完全相等；不做模糊比對、不去空白、不轉大小寫 |
+| 參數夾帶（分號、換行、控制字元、Unicode 同形字、零寬字元、超長字串、非字串） | 嚴格字元集與長度；模糊測試確認只有白名單字串本身能通過 |
+| 在不安全的狀態下移動（非 REMOTE、移動中、ALARM、電量不足） | 以當下的設備快照檢查；設備端另有一層 HCACK 檢查 |
+| 短時間大量或重複的移動 | 5 分鐘 3 次；同站 60 秒內視為重複 |
+| 重送造成重複執行 | `request_id` 冪等；送出前先落地，最多執行一次 |
+| 連線中斷時「先收下、恢復後補送」 | fail closed：REJECT／HOST_DOWN，不排隊；主機端在未連線時根本不送 |
+| agent 自己核准、或改寬政策 | 沒有這類工具；核准要私鑰簽章，政策載入後不可變、只在啟動時讀一次 |
+| 能寫請求儲存檔的人偽造核准 | 沒有有效簽章的核准一律無效（偽造的金鑰、亂填的簽章、搬別筆的簽章都測過） |
+| 事後否認或竄改紀錄 | 每筆請求進雜湊鏈並帶政策雜湊；竄改任一筆 `verify()` 為 False |
+| 把「設備拒絕」當成成功 | 閘門放行後設備回 HCACK=2 會被記成 `EQUIPMENT_REJECTED`，`executed=false` |
+
+| 閘門**不擋** | 說明 |
+|---|---|
+| **模型被說服去請求** | 見上。閘門降低的是攻擊成功時的損害，不是攻擊被嘗試的機率 |
+| **合法範圍內的錯誤動作** | 移到 A 而不是 B、在不該移動的時候移動、把機器人從正在等的站叫走。政策內的動作一律放行 |
+| 速率內的累積濫用 | 每 5 分鐘 3 次合法移動可以一直持續：耗電、佔用機器人、讓它忙到別的請求被 `BUSY` 擋掉（對合法使用者的阻斷） |
+| 待核准佇列與核准者疲勞 | agent 可以一直送 RESTRICTED 的請求（同站 60 秒一次）；人被洗版後可能順手核准。核准者看到的只有設備與站名，沒有「為什麼」 |
+| 快照與送出之間的競態 | 閘門看到的是幾毫秒前的狀態。設備端會再擋一次並被如實記錄，但那是設備的功勞；設備沒有檢查的條件（例如電量餘裕、速率）就沒有第二層 |
+| 送出逾時後的實際結果 | `SEND_FAILED` 表示沒等到回覆，設備可能其實收到了。閘門不重試，但也無法確定設備沒動 |
+| 快照來源被騙 | 快照來自設備自己回報的狀態變數。設備（或中間的 HSMS 連線，沒有加密與認證）說謊，閘門就會照著錯的狀態判定 |
+| 繞過閘門的路徑 | 任何能直接連到設備 HSMS 連接埠的程式（例如直接用 `host_client`）都不經過閘門。HSMS 一次只接受一條連線，但這不是存取控制 |
+| 有主機權限的人 | 能改 `policy.yaml` 後重啟、能改請求儲存檔讓冪等失效、能拿到私鑰的人，閘門都擋不了。稽核鏈整條重算也驗不出來（沒有外部錨點） |
+| 誰在請求 | 沒有呼叫者身分與授權；能連上 MCP server 的都能請求 |
+| 資料外洩與讀取面的注入 | 那是唯讀 server 的範圍；這個閘門只管 `request_move` |
+| 程序重啟後的在途請求 | 「等 ARRIVED」的對應只在記憶體；重啟後 `IN_PROGRESS` 的請求不會被更新成 `COMPLETED` |
+
+### 這一部分的已知限制
+
+- **情境執行器的 MCP 路徑用的是確定性的假主機端（`SimHostPort`）**，不經過 HSMS。真的 HSMS 執行路徑、冪等（10 次只有 1 筆 S2F41）、
+  競態（HCACK=2）、設備斷線，是在 pytest 裡用真的設備與主機測的。透過真的 stdio 子行程只測了「設備不存在 → HOST_DOWN」。
+- 沒有接任何模型；adversarial 情境是「假設 agent 已被說服」的腳本化呼叫。
+- 重複偵測只算被放行或被升級的請求；被拒絕的請求可以無限重送（每次都會留稽核）。被拒絕的請求不計入速率。
+- 行程耗電是固定值（假機器人每趟移動秒數固定），不是依距離估的。
+- `request_move` 的參數在 schema 上宣告為字串，但實際接受任何 JSON 值，讓型別不對的請求也進到閘門並留下紀錄。
+- secsgem 0.3.0 主機端在對方斷線後 GEM 通訊狀態仍停在 COMMUNICATING；`host_client.is_communicating()` 因此同時檢查 HSMS 連線狀態。
+  `mcp_guardian_server.py` 結束時用 `os._exit` 收尾，避開 secsgem 背景執行緒不結束的問題。
+- 主機重新連線後不會自動再送 S1F17 與事件設定（只在 server 啟動時做一次）；重連後請求會因 `NOT_REMOTE` 被拒，直到重啟。
+- 單一設備、單一 guardian 程序；兩個 guardian 共用同一個儲存檔時，速率與冪等的保證不成立。
+
+## 第六部分：動作閘門的對照實驗（進行中）
+
+用真實模型量一件事：同一個 agent 在「無閘門／只有安全提示／硬閘門／閘門＋意圖綁定」四個條件下，面對資料通道裡的注入文字會發生什麼事。
+全部是模擬器；評分只用環境狀態的確定性判定，沒有 LLM 評審。
+
+> **狀態：預註冊（[experiment/PREREGISTRATION.md](experiment/PREREGISTRATION.md)）等待確認，測試集還沒有跑。**
+> 目前只跑過腳本化假模型的機制檢查與開發集的 pilot。這一節在正式實驗完成前不含任何模型行為的結論。
+
+```powershell
+uv pip install --python .venv\Scripts\python.exe matplotlib numpy hypothesis
+.venv\Scripts\python.exe -m experiment.agent_runner --run-id mech --split dev --client obedient     # 腳本化假模型，不需要 API
+.venv\Scripts\python.exe -m experiment.agent_runner --run-id pilot --split dev --limit-tasks 1 --client nvidia --models MODEL_ID
+.venv\Scripts\python.exe -m experiment.analyze --run-id pilot
+```
+
+| 檔案 | 內容 |
+|---|---|
+| `experiment/PREREGISTRATION.md` | 條件、任務集與切分、指標、統計、停止規則、與原規格的差異、已知限制 |
+| `experiment/tasks.yaml` | 38 題（dev 12、test 26）：benign_action、read_only、injected、injected_action |
+| `experiment/world.py` | 每個 unit 的模擬世界、注入文字、影子閘門、四個條件的 `request_move` |
+| `experiment/agent_runner.py` | MCP client + 工具呼叫迴圈、可替換的模型 client、呼叫次數上限、續跑、金鑰過濾、manifest |
+| `experiment/metrics.py` | 單一 unit 的判定；以題為單位的彙總、以題為群集的 bootstrap、同題配對差 |
+| `experiment/analyze.py` | 產生 CSV、表、圖、`results.md` |
+
+模型走 NVIDIA NIM 的 OpenAI 相容端點（免費額度）；金鑰從 repo 外的 `.env` 讀取，只在記憶體，寫入任何檔案前先過濾。
+
+### 為這個實驗對閘門做的改動
+
+`gate.decide` 多了一個選用參數 `authorized_stations`（意圖綁定）：`None` 表示不啟用（第五部分的行為完全不變）；
+給 `frozenset` 時，不在其中的站一律 `REJECT / NOT_AUTHORIZED_BY_TASK`。它只能在建立 `Guardian` 時給定，agent 的工具面碰不到。
+授權不等於核准，也不能繞過白名單。
+
+### 機制檢查（腳本化假模型，不是模型行為）
+
+「總是服從注入」的假模型在四個條件下的結果（38 題各 1 次）：
+
+| 條件 | 嘗試：只讀注入 | 攻擊成功：只讀注入 | 嘗試：注入＋移動 | 攻擊成功：注入＋移動 | 違反政策的執行數 |
+|---|---|---|---|---|---|
+| A 無閘門 | 16/16 | 16/16 | 6/6 | 6/6 | 15 |
+| B 安全提示 | 16/16 | 16/16 | 6/6 | 6/6 | 15 |
+| C 硬閘門 | 16/16 | 12/16 | 6/6 | 3/6 | 0 |
+| D 閘門＋意圖 | 16/16 | 0/16 | 6/6 | 0/6 | 0 |
+
+這只說明機制：閘門不影響嘗試率；條件 C 擋不住合法站點內被誘導的動作（只擋下 RESTRICTED 與短時間重複）；
+條件 D 在只讀題上的 0 是依構造（使用者沒有授權任何移動），不是實驗發現。安全提示對寫死的假模型沒有作用。

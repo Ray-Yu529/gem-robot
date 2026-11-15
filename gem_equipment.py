@@ -109,6 +109,14 @@ class RobotGemEquipment(secsgem.gem.GemEquipmentHandler):
             data_values = [gem_ids.DVID_STATION] if ceid in (gem_ids.CEID_MOVE_STARTED, gem_ids.CEID_ARRIVED) else []
             self.collection_events[ceid] = secsgem.gem.CollectionEvent(ceid, name, data_values)
 
+        # 狀態變數：讓主機用 S1F3 讀機器人狀態與電量（值由 on_sv_value_request 即時提供）
+        self.status_variables[gem_ids.SVID_ROBOT_STATE] = secsgem.gem.StatusVariable(
+            gem_ids.SVID_ROBOT_STATE, "RobotState", "", secsgem.secs.variables.String,
+        )
+        self.status_variables[gem_ids.SVID_BATTERY] = secsgem.gem.StatusVariable(
+            gem_ids.SVID_BATTERY, "Battery", "%", secsgem.secs.variables.F8,
+        )
+
         # 警報：設備端預設啟用（主機仍可用 S5F3 開關）
         alarm = secsgem.gem.Alarm(
             gem_ids.ALID_LOW_BATTERY,
@@ -203,6 +211,14 @@ class RobotGemEquipment(secsgem.gem.GemEquipmentHandler):
     # 控制狀態的現場切換直接用 secsgem 提供的：
     # control_switch_online() / control_switch_offline() /
     # control_switch_online_local() / control_switch_online_remote()
+
+    def on_sv_value_request(self, svid, status_variable):
+        """S1F3：提供機器人狀態與電量的即時值。"""
+        if status_variable.svid == gem_ids.SVID_ROBOT_STATE:
+            return status_variable.value_type(self._robot.state().value)
+        if status_variable.svid == gem_ids.SVID_BATTERY:
+            return status_variable.value_type(float(self._robot.battery()))
+        return super().on_sv_value_request(svid, status_variable)
 
     # ---- S2F41 遠端命令 ------------------------------------------------------
 
