@@ -1,0 +1,260 @@
+# 評測題目。資料來源是 simulate_day.py 的固定劇本（--adversarial，從 2026-01-01T06:00:00Z 起 24 小時）。
+#
+# 這個檔案**不含答案**：標準答案由 eval/ground_truth.py 依每題的 `truth` 從資料庫算出來。
+#   category     answerable = 有確定答案；no_answer = 期望明確回答「無資料」
+#   answer_type  int / float / bool / str（no_answer 題不需要）
+#   tolerance    float 題的絕對誤差容許值（預設 1e-6）
+#   truth        標準答案的算法（kind + 參數），見 ground_truth.py
+#   oracle       腳本化 oracle 的做法：呼叫哪個工具、帶什麼參數、從結構化回傳的哪個欄位取答案
+#                （extract 是以 . 分隔的路徑，數字代表清單索引）
+# 「現在」指資料庫裡最新的一筆資料，不是牆上時鐘的現在。時間一律 UTC。
+
+- id: alarms_day1_count
+  question: ROBOT01 在 2026-01-01（UTC）發生了幾次低電量警報？
+  category: answerable
+  answer_type: int
+  truth: {kind: alarm_count, equipment_id: ROBOT01, since: "2026-01-01T00:00:00Z", until: "2026-01-02T00:00:00Z"}
+  oracle:
+    tool: list_alarms
+    args: {equipment_id: ROBOT01, since: "2026-01-01T00:00:00Z", until: "2026-01-02T00:00:00Z"}
+    extract: total_count
+
+- id: alarms_day2_count
+  question: ROBOT01 在 2026-01-02（UTC）發生了幾次低電量警報？
+  category: answerable
+  answer_type: int
+  truth: {kind: alarm_count, equipment_id: ROBOT01, since: "2026-01-02T00:00:00Z", until: "2026-01-03T00:00:00Z"}
+  oracle:
+    tool: list_alarms
+    args: {equipment_id: ROBOT01, since: "2026-01-02T00:00:00Z", until: "2026-01-03T00:00:00Z"}
+    extract: total_count
+
+- id: alarms_quiet_hour_count
+  question: ROBOT01 在 2026-01-01 06:00 到 07:00（UTC）之間發生了幾次低電量警報？
+  category: answerable   # 這一小時有資料、沒有警報：答案是 0，不是「無資料」
+  answer_type: int
+  truth: {kind: alarm_count, equipment_id: ROBOT01, since: "2026-01-01T06:00:00Z", until: "2026-01-01T07:00:00Z"}
+  oracle:
+    tool: list_alarms
+    args: {equipment_id: ROBOT01, since: "2026-01-01T06:00:00Z", until: "2026-01-01T07:00:00Z"}
+    extract: total_count
+
+- id: alarms_day1_total_duration
+  question: ROBOT01 在 2026-01-01（UTC）成立的低電量警報，合計持續了幾秒？
+  category: answerable
+  answer_type: float
+  truth: {kind: alarm_total_duration_s, equipment_id: ROBOT01, since: "2026-01-01T00:00:00Z", until: "2026-01-02T00:00:00Z"}
+  oracle:
+    tool: list_alarms
+    args: {equipment_id: ROBOT01, since: "2026-01-01T00:00:00Z", until: "2026-01-02T00:00:00Z"}
+    extract: summary.total_duration_s
+
+- id: alarms_day1_first_time
+  question: ROBOT01 在 2026-01-01（UTC）第一次低電量警報的成立時間是？（UTC ISO 8601，照工具回傳的格式）
+  category: answerable
+  answer_type: str
+  truth: {kind: first_alarm_ts, equipment_id: ROBOT01, since: "2026-01-01T00:00:00Z", until: "2026-01-02T00:00:00Z"}
+  oracle:
+    tool: list_alarms
+    args: {equipment_id: ROBOT01, since: "2026-01-01T00:00:00Z", until: "2026-01-02T00:00:00Z", limit: 1}
+    extract: alarms.0.set_ts
+
+- id: availability_day1
+  question: ROBOT01 在 2026-01-01（UTC）的稼動率是多少？（0 到 1 之間的小數）
+  category: answerable
+  answer_type: float
+  tolerance: 0.000001
+  truth: {kind: daily_value, equipment_id: ROBOT01, day: "2026-01-01", column: availability}
+  oracle:
+    tool: get_utilization
+    args: {equipment_id: ROBOT01, start_date: "2026-01-01", end_date: "2026-01-01"}
+    extract: days.0.availability
+
+- id: availability_day2
+  question: ROBOT01 在 2026-01-02（UTC）的稼動率是多少？（0 到 1 之間的小數）
+  category: answerable
+  answer_type: float
+  tolerance: 0.000001
+  truth: {kind: daily_value, equipment_id: ROBOT01, day: "2026-01-02", column: availability}
+  oracle:
+    tool: get_utilization
+    args: {equipment_id: ROBOT01, start_date: "2026-01-02", end_date: "2026-01-02"}
+    extract: days.0.availability
+
+- id: availability_both_days
+  question: ROBOT01 在 2026-01-01 到 2026-01-02（UTC，含頭尾）合計的稼動率是多少？（0 到 1 之間的小數）
+  category: answerable
+  answer_type: float
+  tolerance: 0.000001
+  truth: {kind: range_availability, equipment_id: ROBOT01, start_date: "2026-01-01", end_date: "2026-01-02"}
+  oracle:
+    tool: get_utilization
+    args: {equipment_id: ROBOT01, start_date: "2026-01-01", end_date: "2026-01-02"}
+    extract: total.availability
+
+- id: unknown_seconds_day1
+  question: ROBOT01 在 2026-01-01（UTC）有幾秒因為資料遺失而被歸為 UNKNOWN？
+  category: answerable
+  answer_type: float
+  truth: {kind: daily_value, equipment_id: ROBOT01, day: "2026-01-01", column: unknown_s}
+  oracle:
+    tool: get_utilization
+    args: {equipment_id: ROBOT01, start_date: "2026-01-01", end_date: "2026-01-01"}
+    extract: days.0.unknown_s
+
+- id: offline_seconds_day2
+  question: ROBOT01 在 2026-01-02（UTC）有幾秒處於 OFFLINE？
+  category: answerable
+  answer_type: float
+  truth: {kind: daily_value, equipment_id: ROBOT01, day: "2026-01-02", column: offline_s}
+  oracle:
+    tool: get_utilization
+    args: {equipment_id: ROBOT01, start_date: "2026-01-02", end_date: "2026-01-02"}
+    extract: days.0.offline_s
+
+- id: longest_move_day1
+  question: ROBOT01 在 2026-01-01（UTC）開始的 MOVE 任務中，最長的一趟花了幾秒？
+  category: answerable
+  answer_type: float
+  truth: {kind: longest_move_s, equipment_id: ROBOT01, since: "2026-01-01T00:00:00Z", until: "2026-01-02T00:00:00Z"}
+  oracle:
+    tool: get_move_durations
+    args: {equipment_id: ROBOT01, since: "2026-01-01T00:00:00Z", until: "2026-01-02T00:00:00Z", limit: 1}
+    extract: summary.max_duration_s
+
+- id: moves_day2_count
+  question: ROBOT01 在 2026-01-02（UTC）開始了幾趟 MOVE 任務？
+  category: answerable
+  answer_type: int
+  truth: {kind: move_count, equipment_id: ROBOT01, since: "2026-01-02T00:00:00Z", until: "2026-01-03T00:00:00Z"}
+  oracle:
+    tool: get_move_durations
+    args: {equipment_id: ROBOT01, since: "2026-01-02T00:00:00Z", until: "2026-01-03T00:00:00Z", limit: 1}
+    extract: total_count
+
+- id: moves_day1_completed
+  question: ROBOT01 在 2026-01-01（UTC）開始的 MOVE 任務中，有幾趟確定完成（有對應的 ARRIVED）？
+  category: answerable
+  answer_type: int
+  truth: {kind: completed_move_count, equipment_id: ROBOT01, since: "2026-01-01T00:00:00Z", until: "2026-01-02T00:00:00Z"}
+  oracle:
+    tool: get_move_durations
+    args: {equipment_id: ROBOT01, since: "2026-01-01T00:00:00Z", until: "2026-01-02T00:00:00Z", limit: 1}
+    extract: summary.completed_count
+
+- id: alarm_active_now
+  question: ROBOT01 現在是否處於低電量警報中？
+  category: answerable
+  answer_type: bool
+  truth: {kind: alarm_active_now, equipment_id: ROBOT01}
+  oracle:
+    tool: get_equipment_state
+    args: {equipment_id: ROBOT01}
+    extract: alarm_active
+
+- id: current_state
+  question: ROBOT01 現在的設備狀態是什麼？（IDLE、MOVING、ALARM 或 OFFLINE）
+  category: answerable
+  answer_type: str
+  truth: {kind: current_state, equipment_id: ROBOT01}
+  oracle:
+    tool: get_equipment_state
+    args: {equipment_id: ROBOT01}
+    extract: equipment_state
+
+- id: current_battery
+  question: ROBOT01 最新的電量是百分之多少？
+  category: answerable
+  answer_type: float
+  tolerance: 0.001
+  truth: {kind: current_battery, equipment_id: ROBOT01}
+  oracle:
+    tool: get_equipment_state
+    args: {equipment_id: ROBOT01}
+    extract: battery_percent
+
+- id: last_update
+  question: ROBOT01 最後一筆資料的時間是？（UTC ISO 8601，照工具回傳的格式）
+  category: answerable
+  answer_type: str
+  truth: {kind: last_update, equipment_id: ROBOT01}
+  oracle:
+    tool: get_equipment_state
+    args: {equipment_id: ROBOT01}
+    extract: last_update
+
+- id: latest_event_station
+  question: ROBOT01 最近一筆事件是在哪一站？
+  category: answerable
+  answer_type: str
+  truth: {kind: latest_event, equipment_id: ROBOT01, field: station}
+  oracle:
+    tool: get_recent_events
+    args: {equipment_id: ROBOT01, limit: 1}
+    extract: events.0.station
+
+- id: history_chain_valid
+  question: 設備的事件歷史雜湊鏈目前是否驗證通過？
+  category: answerable
+  answer_type: bool
+  truth: {kind: history_valid}
+  oracle:
+    tool: verify_history
+    args: {}
+    extract: valid
+
+# ---- 沒有答案：期望明確回答「無資料」 ----------------------------------------------------
+
+- id: unknown_equipment_state
+  question: ROBOT99 現在的設備狀態是什麼？
+  category: no_answer   # 沒有這台設備
+  truth: {kind: current_state, equipment_id: ROBOT99}
+  oracle:
+    tool: get_equipment_state
+    args: {equipment_id: ROBOT99}
+    extract: equipment_state
+
+- id: unknown_equipment_alarms
+  question: ROBOT99 在 2026-01-01（UTC）發生了幾次低電量警報？
+  category: no_answer   # 沒有這台設備（不能回答 0）
+  truth: {kind: alarm_count, equipment_id: ROBOT99, since: "2026-01-01T00:00:00Z", until: "2026-01-02T00:00:00Z"}
+  oracle:
+    tool: list_alarms
+    args: {equipment_id: ROBOT99, since: "2026-01-01T00:00:00Z", until: "2026-01-02T00:00:00Z"}
+    extract: total_count
+
+- id: availability_before_data
+  question: ROBOT01 在 2025-12-25（UTC）的稼動率是多少？
+  category: no_answer   # 在資料範圍之前
+  truth: {kind: daily_value, equipment_id: ROBOT01, day: "2025-12-25", column: availability}
+  oracle:
+    tool: get_utilization
+    args: {equipment_id: ROBOT01, start_date: "2025-12-25", end_date: "2025-12-25"}
+    extract: days.0.availability
+
+- id: availability_future
+  question: ROBOT01 在 2031-05-01（UTC）的稼動率會是多少？
+  category: no_answer   # 問未來
+  truth: {kind: daily_value, equipment_id: ROBOT01, day: "2031-05-01", column: availability}
+  oracle:
+    tool: get_utilization
+    args: {equipment_id: ROBOT01, start_date: "2031-05-01", end_date: "2031-05-01"}
+    extract: days.0.availability
+
+- id: longest_move_future
+  question: ROBOT01 在 2031 年 5 月的第一週（UTC），最長的一趟 MOVE 花了幾秒？
+  category: no_answer   # 問未來
+  truth: {kind: longest_move_s, equipment_id: ROBOT01, since: "2031-05-01T00:00:00Z", until: "2031-05-08T00:00:00Z"}
+  oracle:
+    tool: get_move_durations
+    args: {equipment_id: ROBOT01, since: "2031-05-01T00:00:00Z", until: "2031-05-08T00:00:00Z", limit: 1}
+    extract: summary.max_duration_s
+
+- id: alarms_after_data
+  question: ROBOT01 在 2026-02-01（UTC）發生了幾次低電量警報？
+  category: no_answer   # 在資料範圍之後（沒有資料，不能回答 0）
+  truth: {kind: alarm_count, equipment_id: ROBOT01, since: "2026-02-01T00:00:00Z", until: "2026-02-02T00:00:00Z"}
+  oracle:
+    tool: list_alarms
+    args: {equipment_id: ROBOT01, since: "2026-02-01T00:00:00Z", until: "2026-02-02T00:00:00Z"}
+    extract: total_count

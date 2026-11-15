@@ -1,0 +1,19 @@
+# 資料來源以檔案設定（不要在 UI 手點）。用的是唯讀角色，Grafana 沒有寫入資料庫的權限。
+apiVersion: 1
+
+datasources:
+  - name: TimescaleDB
+    uid: gemrobot-timescaledb
+    type: grafana-postgresql-datasource
+    access: proxy
+    url: timescaledb:5432
+    user: ${READONLY_USER}
+    secureJsonData:
+      password: ${READONLY_PASSWORD}
+    jsonData:
+      database: ${POSTGRES_DB}
+      sslmode: disable
+      postgresVersion: 1700
+      timescaledb: true
+    isDefault: true
+    editable: false

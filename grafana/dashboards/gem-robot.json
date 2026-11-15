@@ -1,0 +1,168 @@
+{
+  "uid": "gem-robot-overview",
+  "title": "gem-robot 設備總覽（模擬資料）",
+  "description": "時間一律以 UTC 儲存；稼動率是 E10 風格的簡化對應，非標準實作。",
+  "tags": ["gem-robot", "simulation"],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "refresh": "",
+  "time": { "from": "2026-01-01T06:00:00.000Z", "to": "2026-01-02T06:00:00.000Z" },
+  "templating": {
+    "list": [
+      {
+        "name": "equipment",
+        "label": "設備",
+        "type": "query",
+        "datasource": { "type": "grafana-postgresql-datasource", "uid": "gemrobot-timescaledb" },
+        "query": "SELECT equipment_id FROM ingest_state ORDER BY 1",
+        "refresh": 1,
+        "includeAll": false,
+        "multi": false
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "狀態時間軸",
+      "description": "由狀態轉換算出的區間；UNKNOWN 是資料遺失（seq 缺號）的時段。",
+      "type": "state-timeline",
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 0 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "gemrobot-timescaledb" },
+      "options": {
+        "mergeValues": true,
+        "showValue": "never",
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "fillOpacity": 85, "lineWidth": 0 },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "PRODUCTIVE": { "color": "green", "index": 0 },
+                "STANDBY": { "color": "blue", "index": 1 },
+                "UNSCHEDULED_DOWN": { "color": "red", "index": 2 },
+                "OFFLINE": { "color": "dark-purple", "index": 3 },
+                "UNKNOWN": { "color": "#808080", "index": 4 }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT to_timestamp(start_us / 1000000.0) AS \"time\", e10_state AS \"state\"\nFROM v_state_intervals\nWHERE equipment_id = '$equipment'\n  AND end_us >= $__unixEpochFrom()::bigint * 1000000\n  AND start_us <= $__unixEpochTo()::bigint * 1000000\nUNION ALL\nSELECT to_timestamp(last_ts_us / 1000000.0), NULL\nFROM ingest_state\nWHERE equipment_id = '$equipment'\nORDER BY 1"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "每日稼動率",
+      "description": "PRODUCTIVE ÷（總時間 − OFFLINE − UNKNOWN）。UNKNOWN 秒數單獨列出。",
+      "type": "table",
+      "gridPos": { "h": 7, "w": 14, "x": 0, "y": 6 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "gemrobot-timescaledb" },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "availability" },
+            "properties": [
+              { "id": "unit", "value": "percentunit" },
+              { "id": "decimals", "value": 1 },
+              { "id": "custom.cellOptions", "value": { "type": "gauge", "mode": "basic" } },
+              { "id": "min", "value": 0 },
+              { "id": "max", "value": 1 }
+            ]
+          },
+          {
+            "matcher": { "id": "byRegexp", "options": ".*_s$" },
+            "properties": [{ "id": "unit", "value": "s" }]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT day, availability, productive_s, standby_s, unscheduled_down_s, offline_s, unknown_s, total_s\nFROM v_daily_availability\nWHERE equipment_id = '$equipment'\nORDER BY day"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "警報次數（每日）",
+      "type": "barchart",
+      "gridPos": { "h": 7, "w": 10, "x": 14, "y": 6 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "gemrobot-timescaledb" },
+      "options": { "xField": "day", "legend": { "showLegend": true, "placement": "bottom" } },
+      "fieldConfig": { "defaults": { "decimals": 0, "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT day, alarm || ' set' AS metric, set_count::int AS count\nFROM v_daily_alarm_stats\nWHERE equipment_id = '$equipment'\nORDER BY day"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "電量趨勢",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 14, "x": 0, "y": 13 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "gemrobot-timescaledb" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "custom": { "lineWidth": 1, "fillOpacity": 10, "spanNulls": false },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 20 }] }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT to_timestamp(ts_us / 1000000.0) AS \"time\", battery\nFROM telemetry\nWHERE equipment_id = '$equipment'\n  AND ts_us BETWEEN $__unixEpochFrom()::bigint * 1000000 AND $__unixEpochTo()::bigint * 1000000\nORDER BY 1"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "MOVE 任務耗時（MOVE_STARTED → ARRIVED）",
+      "description": "只畫確定完成的任務；被警報中止或中間有資料缺口的不計。",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 10, "x": 14, "y": 13 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "gemrobot-timescaledb" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": { "drawStyle": "points", "pointSize": 5, "showPoints": "always" }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT to_timestamp(started_us / 1000000.0) AS \"time\", station AS metric, duration_s\nFROM v_move_durations\nWHERE equipment_id = '$equipment'\n  AND duration_s IS NOT NULL\n  AND started_us BETWEEN $__unixEpochFrom()::bigint * 1000000 AND $__unixEpochTo()::bigint * 1000000\nORDER BY 1"
+        }
+      ]
+    }
+  ]
+}

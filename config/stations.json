@@ -1,0 +1,11 @@
+{
+  "stations": ["A", "B", "CHARGER"],
+  "start_station": "CHARGER",
+  "move_seconds": 5.0,
+  "battery": {
+    "initial": 100.0,
+    "full": 100.0,
+    "drain_per_second": 2.0,
+    "low_threshold": 20.0
+  }
+}

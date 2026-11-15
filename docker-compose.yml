@@ -1,0 +1,85 @@
+# mosquitto + TimescaleDB + Grafana。只用模擬資料；所有連接埠只綁 127.0.0.1。
+# 帳密全部來自 .env（從 .env.example 複製後自行填值；.env 不進版控）。
+#
+#   docker compose up -d --wait
+#   docker compose down -v      # 連資料一起清掉（初始化 SQL 只在資料卷第一次建立時執行）
+
+name: gem-robot
+
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2          # 實測時解析為 2.1.2
+    restart: unless-stopped
+    environment:
+      MQTT_USERNAME: ${MQTT_USERNAME:?set MQTT_USERNAME in .env}
+      MQTT_PASSWORD: ${MQTT_PASSWORD:?set MQTT_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:${MQTT_PORT:-1883}:1883"
+    volumes:
+      - ./docker/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    # 啟動時由環境變數產生密碼檔（只存在容器內），再啟動 broker
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        mosquitto_passwd -b -c /mosquitto/data/passwd "$$MQTT_USERNAME" "$$MQTT_PASSWORD"
+        && chown mosquitto:mosquitto /mosquitto/data/passwd
+        && exec /usr/sbin/mosquitto -c /mosquitto/config/mosquitto.conf
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_sub -h 127.0.0.1 -u \"$$MQTT_USERNAME\" -P \"$$MQTT_PASSWORD\" -t '$$SYS/broker/uptime' -C 1 -W 3 >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  timescaledb:
+    image: timescale/timescaledb:2.32.0-pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-gemrobot}
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}          # 擁有者：只給 ingest 用
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      READONLY_USER: ${READONLY_USER:?set READONLY_USER in .env}          # 只有 SELECT：MCP server 與 Grafana 用
+      READONLY_PASSWORD: ${READONLY_PASSWORD:?set READONLY_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # 逐檔掛載：不要蓋掉映像檔自己放在 initdb.d 的 TimescaleDB 初始化腳本
+      - ./sql/pg/010_schema.sql:/docker-entrypoint-initdb.d/010_schema.sql:ro
+      - ./sql/pg/020_views.sql:/docker-entrypoint-initdb.d/020_views.sql:ro
+      - ./sql/pg/030_readonly_role.sh:/docker-entrypoint-initdb.d/030_readonly_role.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\" && psql -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\" -tAc \"SELECT 1 FROM pg_roles WHERE rolname = '$$READONLY_USER'\" | grep -q 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+
+  grafana:
+    image: grafana/grafana-oss:13.0.2
+    restart: unless-stopped
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:?set GRAFANA_ADMIN_USER in .env}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      # 給 provisioning 的資料來源用（唯讀角色）
+      POSTGRES_DB: ${POSTGRES_DB:-gemrobot}
+      READONLY_USER: ${READONLY_USER}
+      READONLY_PASSWORD: ${READONLY_PASSWORD}
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health | grep -q '\"database\": *\"ok\"'"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+
+volumes:
+  pgdata:

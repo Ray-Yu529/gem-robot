@@ -1,0 +1,36 @@
+[project]
+name = "gem-robot"
+version = "0.1.0"
+description = "GEM subset equipment (secsgem) backed by a fake robot - simulator only"
+requires-python = ">=3.11"
+dependencies = [
+    "secsgem==0.3.0",
+    "jsonschema>=4.23",   # 載荷驗證（secsgem 本來就會帶進來）
+    "paho-mqtt>=2,<3",    # 只有 MqttTransport 與 ingest.py 的 MQTT 入口用到
+    "mcp>=2.3,<3",        # 唯讀 MCP server 與評測用的 client（依 2.3.0 的 API 撰寫）
+    "pyyaml>=6",          # eval/questions.yaml
+    "psycopg[binary]>=3.2,<4",  # TimescaleDB 後端（只用 SQLite 時不會被 import 到連線）
+]
+
+[project.optional-dependencies]
+real-model = ["anthropic>=1"]  # 只有 eval 的真實模型 client 需要；預設不安裝、不啟用
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-m 'not integration'"   # 預設不跑需要 docker 的測試；要跑請用 -m integration
+markers = [
+    "integration: 需要 docker compose 的 mosquitto + TimescaleDB + Grafana（約 2 分鐘）",
+    "e2e: 跑完整的 simulate_day（約 10 秒）；用 -m \"not e2e\" 跳過",
+]
+filterwarnings = [
+    # secsgem 0.3.0 在 Windows 上，passive 端 accept 之後對 listening socket 呼叫 shutdown()
+    # 會丟 WinError 10057（連線本身已建立，不影響收發）。見 README「限制」。
+    "ignore::pytest.PytestUnhandledThreadExceptionWarning",
+]
